@@ -1,450 +1,359 @@
-name: Generic CI/CD Pipeline
+name: Generic Dependency Management
 
-# 100% Portable - Works with ANY repository
-# Gracefully handles all dependency conflicts and installation failures
+# Auto-detects and manages dependencies for any project type
+# Supports: npm, yarn, pnpm, pip, poetry, go mod, cargo, maven, gradle, bundler
 
 on:
-  push:
-    branches:
-      - main
-      - master
-      - develop
-      - development
-      - '**-dev'
-  pull_request:
-    branches:
-      - main
-      - master
-      - develop
-      - development
+  schedule:
+    # Run every Monday at 9 AM UTC
+    - cron: '0 9 * * 1'
   workflow_dispatch:
     inputs:
-      skip_tests:
-        description: 'Skip test execution'
+      auto_update:
+        description: 'Automatically create PR with updates'
         required: false
-        default: 'false'
+        default: 'true'
         type: boolean
+  push:
+    paths:
+      # Node.js
+      - 'package.json'
+      - 'package-lock.json'
+      - 'yarn.lock'
+      - 'pnpm-lock.yaml'
+      # Python
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - 'poetry.lock'
+      - 'Pipfile.lock'
+      # Go
+      - 'go.mod'
+      - 'go.sum'
+      # Rust
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      # Ruby
+      - 'Gemfile'
+      - 'Gemfile.lock'
+      # Java
+      - 'pom.xml'
+      - 'build.gradle*'
 
-env:
-  NODE_VERSION: '20'
-  PYTHON_VERSION: '3.11'
-  GO_VERSION: '1.21'
-  ARTIFACT_RETENTION_DAYS: 30
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
-  # ============================================================================
-  # Detect project type
-  # ============================================================================
-  detect-project:
-    name: 🔍 Detect Project Type
+  detect-dependencies:
+    name: 🔍 Detect Dependency Files
     runs-on: ubuntu-latest
     outputs:
-      has-nodejs: ${{ steps.detect.outputs.has-nodejs }}
-      has-python: ${{ steps.detect.outputs.has-python }}
+      has-npm: ${{ steps.detect.outputs.has-npm }}
+      has-yarn: ${{ steps.detect.outputs.has-yarn }}
+      has-pnpm: ${{ steps.detect.outputs.has-pnpm }}
+      has-pip: ${{ steps.detect.outputs.has-pip }}
+      has-poetry: ${{ steps.detect.outputs.has-poetry }}
+      has-pipenv: ${{ steps.detect.outputs.has-pipenv }}
       has-go: ${{ steps.detect.outputs.has-go }}
-      has-docker: ${{ steps.detect.outputs.has-docker }}
-      has-docs: ${{ steps.detect.outputs.has-docs }}
-      branch-type: ${{ steps.detect.outputs.branch-type }}
+      has-cargo: ${{ steps.detect.outputs.has-cargo }}
+      has-bundler: ${{ steps.detect.outputs.has-bundler }}
+      has-maven: ${{ steps.detect.outputs.has-maven }}
+      has-gradle: ${{ steps.detect.outputs.has-gradle }}
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect project structure
+      - name: Detect package managers
         id: detect
         run: |
-          echo "🔍 Analyzing project..."
-          
           # Node.js
-          if [ -f "package.json" ]; then
-            echo "has-nodejs=true" >> $GITHUB_OUTPUT
-            echo "✅ Node.js detected"
-          else
-            echo "has-nodejs=false" >> $GITHUB_OUTPUT
-          fi
+          [ -f "package-lock.json" ] && echo "has-npm=true" >> $GITHUB_OUTPUT || echo "has-npm=false" >> $GITHUB_OUTPUT
+          [ -f "yarn.lock" ] && echo "has-yarn=true" >> $GITHUB_OUTPUT || echo "has-yarn=false" >> $GITHUB_OUTPUT
+          [ -f "pnpm-lock.yaml" ] && echo "has-pnpm=true" >> $GITHUB_OUTPUT || echo "has-pnpm=false" >> $GITHUB_OUTPUT
           
           # Python
-          if [ -f "requirements.txt" ] || [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
-            echo "has-python=true" >> $GITHUB_OUTPUT
-            echo "✅ Python detected"
-          else
-            echo "has-python=false" >> $GITHUB_OUTPUT
-          fi
+          [ -f "requirements.txt" ] && echo "has-pip=true" >> $GITHUB_OUTPUT || echo "has-pip=false" >> $GITHUB_OUTPUT
+          [ -f "poetry.lock" ] && echo "has-poetry=true" >> $GITHUB_OUTPUT || echo "has-poetry=false" >> $GITHUB_OUTPUT
+          [ -f "Pipfile.lock" ] && echo "has-pipenv=true" >> $GITHUB_OUTPUT || echo "has-pipenv=false" >> $GITHUB_OUTPUT
           
           # Go
-          if [ -f "go.mod" ]; then
-            echo "has-go=true" >> $GITHUB_OUTPUT
-            echo "✅ Go detected"
-          else
-            echo "has-go=false" >> $GITHUB_OUTPUT
-          fi
+          [ -f "go.mod" ] && echo "has-go=true" >> $GITHUB_OUTPUT || echo "has-go=false" >> $GITHUB_OUTPUT
           
-          # Docker
-          if find . -maxdepth 2 -name "Dockerfile*" | grep -q .; then
-            echo "has-docker=true" >> $GITHUB_OUTPUT
-            echo "✅ Docker detected"
-          else
-            echo "has-docker=false" >> $GITHUB_OUTPUT
-          fi
+          # Rust
+          [ -f "Cargo.toml" ] && echo "has-cargo=true" >> $GITHUB_OUTPUT || echo "has-cargo=false" >> $GITHUB_OUTPUT
           
-          # Documentation
-          if find . -name "*.md" ! -path "./node_modules/*" ! -path "./.git/*" | grep -q .; then
-            echo "has-docs=true" >> $GITHUB_OUTPUT
-            echo "✅ Documentation detected"
-          else
-            echo "has-docs=false" >> $GITHUB_OUTPUT
-          fi
+          # Ruby
+          [ -f "Gemfile" ] && echo "has-bundler=true" >> $GITHUB_OUTPUT || echo "has-bundler=false" >> $GITHUB_OUTPUT
           
-          # Branch type
-          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
-          case "$BRANCH_NAME" in
-            main|master) echo "branch-type=production" >> $GITHUB_OUTPUT ;;
-            develop|development) echo "branch-type=staging" >> $GITHUB_OUTPUT ;;
-            *-dev) echo "branch-type=personal" >> $GITHUB_OUTPUT ;;
-            *) echo "branch-type=feature" >> $GITHUB_OUTPUT ;;
-          esac
+          # Java
+          [ -f "pom.xml" ] && echo "has-maven=true" >> $GITHUB_OUTPUT || echo "has-maven=false" >> $GITHUB_OUTPUT
+          [ -f "build.gradle" ] || [ -f "build.gradle.kts" ] && echo "has-gradle=true" >> $GITHUB_OUTPUT || echo "has-gradle=false" >> $GITHUB_OUTPUT
 
-      - name: Generate report
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY <<EOF
-          # 🔍 Project Detection
-          
-          | Component | Status |
-          |-----------|--------|
-          | Node.js | ${{ steps.detect.outputs.has-nodejs == 'true' && '✅' || '❌' }} |
-          | Python | ${{ steps.detect.outputs.has-python == 'true' && '✅' || '❌' }} |
-          | Go | ${{ steps.detect.outputs.has-go == 'true' && '✅' || '❌' }} |
-          | Docker | ${{ steps.detect.outputs.has-docker == 'true' && '✅' || '❌' }} |
-          | Docs | ${{ steps.detect.outputs.has-docs == 'true' && '✅' || '❌' }} |
-          
-          **Branch Type**: ${{ steps.detect.outputs.branch-type }}
-          EOF
-
-  # ============================================================================
-  # Code Quality - NEVER FAILS, always continues
-  # ============================================================================
-  code-quality:
-    name: 🔍 Code Quality
+  check-outdated:
+    name: 📦 Check Outdated Dependencies
     runs-on: ubuntu-latest
-    needs: detect-project
-    if: needs.detect-project.outputs.has-nodejs == 'true' || needs.detect-project.outputs.has-python == 'true' || needs.detect-project.outputs.has-go == 'true'
+    needs: detect-dependencies
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # Node.js - ALL steps continue on error
-      - name: Setup Node.js
-        if: needs.detect-project.outputs.has-nodejs == 'true'
-        uses: actions/setup-node@v4
-        continue-on-error: true
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+      # Node.js - NPM
+      - name: Check NPM outdated
+        if: needs.detect-dependencies.outputs.has-npm == 'true'
+        run: |
+          echo "## 📦 NPM Dependencies" >> $GITHUB_STEP_SUMMARY
+          npm outdated --long || echo "All packages up to date" >> $GITHUB_STEP_SUMMARY
 
-      - name: Install Node dependencies
-        if: needs.detect-project.outputs.has-nodejs == 'true'
+      # Node.js - Yarn
+      - name: Check Yarn outdated
+        if: needs.detect-dependencies.outputs.has-yarn == 'true'
+        run: |
+          echo "## 🧶 Yarn Dependencies" >> $GITHUB_STEP_SUMMARY
+          yarn outdated || echo "All packages up to date" >> $GITHUB_STEP_SUMMARY
+
+      # Node.js - pnpm
+      - name: Check pnpm outdated
+        if: needs.detect-dependencies.outputs.has-pnpm == 'true'
+        run: |
+          npm install -g pnpm
+          echo "## 📦 pnpm Dependencies" >> $GITHUB_STEP_SUMMARY
+          pnpm outdated || echo "All packages up to date" >> $GITHUB_STEP_SUMMARY
+
+      # Python - pip
+      - name: Check pip outdated
+        if: needs.detect-dependencies.outputs.has-pip == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt 2>/dev/null || true
+          echo "## 🐍 Python Dependencies" >> $GITHUB_STEP_SUMMARY
+          pip list --outdated || echo "All packages up to date" >> $GITHUB_STEP_SUMMARY
+
+      # Python - Poetry
+      - name: Check Poetry outdated
+        if: needs.detect-dependencies.outputs.has-poetry == 'true'
+        run: |
+          pip install poetry
+          echo "## 📜 Poetry Dependencies" >> $GITHUB_STEP_SUMMARY
+          poetry show --outdated || echo "All packages up to date" >> $GITHUB_STEP_SUMMARY
+
+      # Go
+      - name: Check Go outdated
+        if: needs.detect-dependencies.outputs.has-go == 'true'
+        run: |
+          echo "## 🐹 Go Dependencies" >> $GITHUB_STEP_SUMMARY
+          go list -u -m all || echo "All packages up to date" >> $GITHUB_STEP_SUMMARY
+
+      # Rust
+      - name: Check Cargo outdated
+        if: needs.detect-dependencies.outputs.has-cargo == 'true'
+        run: |
+          cargo install cargo-outdated || true
+          echo "## 🦀 Rust Dependencies" >> $GITHUB_STEP_SUMMARY
+          cargo outdated || echo "All packages up to date" >> $GITHUB_STEP_SUMMARY
+
+      # Ruby
+      - name: Check Bundler outdated
+        if: needs.detect-dependencies.outputs.has-bundler == 'true'
+        run: |
+          bundle install
+          echo "## 💎 Ruby Dependencies" >> $GITHUB_STEP_SUMMARY
+          bundle outdated || echo "All gems up to date" >> $GITHUB_STEP_SUMMARY
+
+  security-audit:
+    name: 🔒 Security Audit
+    runs-on: ubuntu-latest
+    needs: detect-dependencies
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Node.js audit
+      - name: NPM audit
+        if: needs.detect-dependencies.outputs.has-npm == 'true'
         continue-on-error: true
         run: |
-          echo "📦 Installing Node.js dependencies..."
-          if [ -f "pnpm-lock.yaml" ]; then
-            npm install -g pnpm && pnpm install --no-frozen-lockfile || pnpm install --force || echo "⚠️ pnpm install had issues"
-          elif [ -f "yarn.lock" ]; then
-            yarn install || yarn install --ignore-engines || echo "⚠️ yarn install had issues"
-          elif [ -f "package-lock.json" ]; then
-            npm ci --legacy-peer-deps || npm ci --force || npm install --legacy-peer-deps || npm install || echo "⚠️ npm install had issues"
-          else
-            npm install --legacy-peer-deps || npm install || echo "⚠️ npm install had issues"
-          fi
-          echo "✅ Dependency installation attempted"
-
-      - name: Run Node.js linter
-        if: needs.detect-project.outputs.has-nodejs == 'true'
-        continue-on-error: true
-        run: |
-          if grep -q '"lint"' package.json 2>/dev/null; then
-            npm run lint || echo "⚠️ Linting completed with warnings"
-          else
-            echo "ℹ️ No lint script found"
-          fi
-
-      # Python - ALL steps continue on error
-      - name: Setup Python
-        if: needs.detect-project.outputs.has-python == 'true'
-        uses: actions/setup-python@v5
-        continue-on-error: true
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install Python linting tools
-        if: needs.detect-project.outputs.has-python == 'true'
-        continue-on-error: true
-        run: |
-          python -m pip install --upgrade pip || true
-          pip install flake8 pylint black isort || true
-
-      - name: Install Python dependencies
-        if: needs.detect-project.outputs.has-python == 'true'
-        continue-on-error: true
-        run: |
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt || echo "⚠️ Some dependencies couldn't install"
-          fi
-
-      - name: Run Python linters
-        if: needs.detect-project.outputs.has-python == 'true'
-        continue-on-error: true
-        run: |
-          PYTHON_FILES=$(find . -name "*.py" ! -path "./venv/*" ! -path "./.venv/*" ! -path "./env/*" ! -path "./node_modules/*" 2>/dev/null)
+          echo "## 🔒 NPM Security Audit" >> $GITHUB_STEP_SUMMARY
+          npm audit --json > npm-audit.json || true
           
-          if [ -n "$PYTHON_FILES" ]; then
-            echo "Running flake8..."
-            flake8 $PYTHON_FILES --max-line-length=120 --exclude=venv,.venv,env,node_modules --count --statistics || echo "⚠️ Linting found issues"
+          if [ -f "npm-audit.json" ]; then
+            CRITICAL=$(jq '.metadata.vulnerabilities.critical // 0' npm-audit.json)
+            HIGH=$(jq '.metadata.vulnerabilities.high // 0' npm-audit.json)
+            MODERATE=$(jq '.metadata.vulnerabilities.moderate // 0' npm-audit.json)
+            LOW=$(jq '.metadata.vulnerabilities.low // 0' npm-audit.json)
+            
+            echo "- 🔴 Critical: $CRITICAL" >> $GITHUB_STEP_SUMMARY
+            echo "- 🟠 High: $HIGH" >> $GITHUB_STEP_SUMMARY
+            echo "- 🟡 Moderate: $MODERATE" >> $GITHUB_STEP_SUMMARY
+            echo "- 🟢 Low: $LOW" >> $GITHUB_STEP_SUMMARY
           fi
 
-      # Go - ALL steps continue on error
-      - name: Setup Go
-        if: needs.detect-project.outputs.has-go == 'true'
-        uses: actions/setup-go@v5
-        continue-on-error: true
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Run Go checks
-        if: needs.detect-project.outputs.has-go == 'true'
+      # Python audit
+      - name: Python safety check
+        if: needs.detect-dependencies.outputs.has-pip == 'true'
         continue-on-error: true
         run: |
-          go fmt ./... || true
-          go vet ./... || echo "⚠️ Go vet found issues"
-
-  # ============================================================================
-  # Tests - NEVER FAILS, always continues
-  # ============================================================================
-  test:
-    name: 🧪 Run Tests
-    runs-on: ubuntu-latest
-    needs: detect-project
-    if: github.event.inputs.skip_tests != 'true' && (needs.detect-project.outputs.has-nodejs == 'true' || needs.detect-project.outputs.has-python == 'true' || needs.detect-project.outputs.has-go == 'true')
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Node.js tests
-      - name: Setup Node.js
-        if: needs.detect-project.outputs.has-nodejs == 'true'
-        uses: actions/setup-node@v4
-        continue-on-error: true
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install Node dependencies for testing
-        if: needs.detect-project.outputs.has-nodejs == 'true'
-        continue-on-error: true
-        run: |
-          if [ -f "pnpm-lock.yaml" ]; then
-            npm install -g pnpm && pnpm install --no-frozen-lockfile || pnpm install --force || echo "⚠️ Install issues"
-          elif [ -f "yarn.lock" ]; then
-            yarn install || yarn install --ignore-engines || echo "⚠️ Install issues"
-          else
-            npm ci --legacy-peer-deps || npm ci --force || npm install --legacy-peer-deps || npm install || echo "⚠️ Install issues"
-          fi
-
-      - name: Run Node.js tests
-        if: needs.detect-project.outputs.has-nodejs == 'true'
-        continue-on-error: true
-        run: |
-          if grep -q '"test"' package.json 2>/dev/null; then
-            npm test || echo "⚠️ Some tests failed"
-          else
-            echo "ℹ️ No test script found"
-          fi
-
-      # Python tests
-      - name: Setup Python
-        if: needs.detect-project.outputs.has-python == 'true'
-        uses: actions/setup-python@v5
-        continue-on-error: true
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install Python dependencies for testing
-        if: needs.detect-project.outputs.has-python == 'true'
-        continue-on-error: true
-        run: |
-          python -m pip install --upgrade pip || true
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt || echo "⚠️ Some dependencies couldn't install"
-          fi
-          pip install pytest pytest-cov || true
-
-      - name: Run Python tests
-        if: needs.detect-project.outputs.has-python == 'true'
-        continue-on-error: true
-        run: |
-          if [ -d "tests" ] || find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
-            pytest --cov --cov-report=xml --cov-report=term || echo "⚠️ Some tests failed"
-          else
-            echo "ℹ️ No tests found"
-          fi
-
-      # Go tests
-      - name: Setup Go
-        if: needs.detect-project.outputs.has-go == 'true'
-        uses: actions/setup-go@v5
-        continue-on-error: true
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Run Go tests
-        if: needs.detect-project.outputs.has-go == 'true'
-        continue-on-error: true
-        run: |
-          go test -v ./... || echo "⚠️ Some tests failed"
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        continue-on-error: true
-        with:
-          files: ./coverage.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-
-  # ============================================================================
-  # Security - NEVER FAILS, always continues
-  # ============================================================================
-  security:
-    name: 🔒 Security Scan
-    runs-on: ubuntu-latest
-    needs: detect-project
-    permissions:
-      security-events: write
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run Trivy scanner
-        uses: aquasecurity/trivy-action@master
-        continue-on-error: true
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-
-      - name: Upload Trivy results
-        uses: github/codeql-action/upload-sarif@v3
-        continue-on-error: true
-        with:
-          sarif_file: 'trivy-results.sarif'
-
-      - name: Check for exposed secrets
-        continue-on-error: true
-        run: |
-          echo "🔍 Scanning for potential secrets..."
-          git ls-files | while read file; do
-            if grep -iE "(password|secret|api[_-]?key|token)" "$file" 2>/dev/null | grep -v "github.com" | head -3; then
-              echo "⚠️ Potential secret pattern in: $file"
-            fi
-          done || true
-
-  # ============================================================================
-  # Build - Only on main/staging
-  # ============================================================================
-  build:
-    name: 🏗️ Build Artifacts
-    runs-on: ubuntu-latest
-    needs: [detect-project, code-quality, test]
-    if: always() && (needs.detect-project.outputs.branch-type == 'production' || needs.detect-project.outputs.branch-type == 'staging')
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Build Node.js project
-        if: needs.detect-project.outputs.has-nodejs == 'true'
-        continue-on-error: true
-        run: |
-          if [ -f "package-lock.json" ]; then
-            npm ci --legacy-peer-deps || npm ci --force || npm install --legacy-peer-deps || echo "⚠️ Install issues"
-          else
-            npm install --legacy-peer-deps || echo "⚠️ Install issues"
-          fi
+          pip install safety
+          echo "## 🔒 Python Security Audit" >> $GITHUB_STEP_SUMMARY
+          safety check --json > safety-report.json || true
           
-          if grep -q '"build"' package.json 2>/dev/null; then
-            npm run build || echo "⚠️ Build had issues"
+          if [ -f "safety-report.json" ]; then
+            VULN_COUNT=$(jq 'length' safety-report.json 2>/dev/null || echo "0")
+            echo "Found $VULN_COUNT vulnerabilities" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Build Go project
-        if: needs.detect-project.outputs.has-go == 'true'
+      # Go audit
+      - name: Go vulnerability check
+        if: needs.detect-dependencies.outputs.has-go == 'true'
         continue-on-error: true
         run: |
-          go build -v ./... || echo "⚠️ Build had issues"
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          echo "## 🔒 Go Security Audit" >> $GITHUB_STEP_SUMMARY
+          govulncheck ./... || echo "Security check complete" >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload build artifacts
+      # Rust audit
+      - name: Cargo audit
+        if: needs.detect-dependencies.outputs.has-cargo == 'true'
+        continue-on-error: true
+        run: |
+          cargo install cargo-audit || true
+          echo "## 🔒 Rust Security Audit" >> $GITHUB_STEP_SUMMARY
+          cargo audit || echo "Security check complete" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload security reports
         uses: actions/upload-artifact@v4
-        continue-on-error: true
         with:
-          name: build-artifacts-${{ github.sha }}
+          name: security-reports-${{ github.sha }}
           path: |
-            dist/
-            build/
-            out/
-            target/
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+            npm-audit.json
+            safety-report.json
+          retention-days: 30
 
-  # ============================================================================
-  # Summary Report
-  # ============================================================================
-  report:
-    name: 📊 Generate Report
+  auto-update:
+    name: 🔄 Auto-update Dependencies
     runs-on: ubuntu-latest
-    needs: [detect-project, code-quality, test, security, build]
+    needs: [detect-dependencies, check-outdated, security-audit]
+    if: (github.event_name == 'schedule' || github.event.inputs.auto_update == 'true') && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Update Node.js dependencies
+      - name: Update NPM dependencies
+        if: needs.detect-dependencies.outputs.has-npm == 'true'
+        run: |
+          npm update
+          npm audit fix --force || true
+
+      - name: Update Yarn dependencies
+        if: needs.detect-dependencies.outputs.has-yarn == 'true'
+        run: |
+          yarn upgrade
+          yarn audit fix || true
+
+      - name: Update pnpm dependencies
+        if: needs.detect-dependencies.outputs.has-pnpm == 'true'
+        run: |
+          npm install -g pnpm
+          pnpm update
+          pnpm audit fix || true
+
+      # Update Python dependencies
+      - name: Update pip dependencies
+        if: needs.detect-dependencies.outputs.has-pip == 'true'
+        continue-on-error: true
+        run: |
+          pip install pip-tools || true
+          pip-compile --upgrade requirements.in -o requirements.txt 2>/dev/null || true
+
+      - name: Update Poetry dependencies
+        if: needs.detect-dependencies.outputs.has-poetry == 'true'
+        run: |
+          pip install poetry
+          poetry update || true
+
+      # Update Go dependencies
+      - name: Update Go dependencies
+        if: needs.detect-dependencies.outputs.has-go == 'true'
+        run: |
+          go get -u ./...
+          go mod tidy
+
+      # Update Rust dependencies
+      - name: Update Cargo dependencies
+        if: needs.detect-dependencies.outputs.has-cargo == 'true'
+        run: |
+          cargo update
+
+      # Update Ruby dependencies
+      - name: Update Bundler dependencies
+        if: needs.detect-dependencies.outputs.has-bundler == 'true'
+        run: |
+          bundle update
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore(deps): update dependencies'
+          title: '🔄 Automated Dependency Updates'
+          body: |
+            ## 🤖 Automated Dependency Update
+            
+            This PR contains automated dependency updates across all package managers.
+            
+            ### 📦 Updated Dependencies
+            Review the files changed to see what was updated.
+            
+            ### ✅ Checks Performed
+            - [x] Outdated packages identified
+            - [x] Security vulnerabilities checked
+            - [x] Updates applied
+            
+            ### ⚠️ Before Merging
+            - [ ] Review changelog for breaking changes
+            - [ ] Verify all tests pass
+            - [ ] Test locally if needed
+            
+            ---
+            *Auto-generated on $(date)*
+          branch: chore/dependency-updates-${{ github.run_number }}
+          delete-branch: true
+          labels: |
+            dependencies
+            automated
+            security
+
+  summary:
+    name: 📊 Summary Report
+    runs-on: ubuntu-latest
+    needs: [detect-dependencies, check-outdated, security-audit]
     if: always()
-    permissions:
-      pull-requests: write
     steps:
       - name: Generate summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY <<EOF
-          # 📊 Pipeline Report
+          # 📦 Dependency Management Report
           
-          ## 🎯 Project Info
-          - **Repository**: ${{ github.repository }}
-          - **Branch**: ${{ github.ref_name }}
-          - **Commit**: ${{ github.sha }}
-          - **Branch Type**: ${{ needs.detect-project.outputs.branch-type }}
+          ## 🔍 Detected Package Managers
+          | Package Manager | Status |
+          |-----------------|--------|
+          | NPM | ${{ needs.detect-dependencies.outputs.has-npm == 'true' && '✅' || '❌' }} |
+          | Yarn | ${{ needs.detect-dependencies.outputs.has-yarn == 'true' && '✅' || '❌' }} |
+          | pnpm | ${{ needs.detect-dependencies.outputs.has-pnpm == 'true' && '✅' || '❌' }} |
+          | pip | ${{ needs.detect-dependencies.outputs.has-pip == 'true' && '✅' || '❌' }} |
+          | Poetry | ${{ needs.detect-dependencies.outputs.has-poetry == 'true' && '✅' || '❌' }} |
+          | Pipenv | ${{ needs.detect-dependencies.outputs.has-pipenv == 'true' && '✅' || '❌' }} |
+          | Go | ${{ needs.detect-dependencies.outputs.has-go == 'true' && '✅' || '❌' }} |
+          | Cargo | ${{ needs.detect-dependencies.outputs.has-cargo == 'true' && '✅' || '❌' }} |
+          | Bundler | ${{ needs.detect-dependencies.outputs.has-bundler == 'true' && '✅' || '❌' }} |
+          | Maven | ${{ needs.detect-dependencies.outputs.has-maven == 'true' && '✅' || '❌' }} |
+          | Gradle | ${{ needs.detect-dependencies.outputs.has-gradle == 'true' && '✅' || '❌' }} |
           
-          ## 📦 Technologies Detected
-          | Tech | Status |
-          |------|--------|
-          | Node.js | ${{ needs.detect-project.outputs.has-nodejs == 'true' && '✅' || '❌' }} |
-          | Python | ${{ needs.detect-project.outputs.has-python == 'true' && '✅' || '❌' }} |
-          | Go | ${{ needs.detect-project.outputs.has-go == 'true' && '✅' || '❌' }} |
-          | Docker | ${{ needs.detect-project.outputs.has-docker == 'true' && '✅' || '❌' }} |
-          
-          ## ✅ Job Results
-          | Job | Result |
-          |-----|--------|
-          | Detection | ${{ needs.detect-project.result }} |
-          | Code Quality | ${{ needs.code-quality.result }} |
-          | Tests | ${{ needs.test.result }} |
-          | Security | ${{ needs.security.result }} |
-          | Build | ${{ needs.build.result }} |
+          ## 📊 Job Status
+          - Check Outdated: ${{ needs.check-outdated.result }}
+          - Security Audit: ${{ needs.security-audit.result }}
           
           ---
-          ℹ️ **Note**: Jobs marked as "failure" may have encountered issues but the workflow continued.
-          Check individual job logs for details.
+          *Generated by Generic Dependency Management*
           EOF
-
-      - name: Comment on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        continue-on-error: true
-        with:
-          script: |
-            const needs = ${{ toJSON(needs) }};
-            let emoji = '✅';
-            const failed = Object.values(needs).filter(j => j.result === 'failure').length;
-            if (failed > 0) emoji = '⚠️';
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## ${emoji} CI/CD Pipeline Complete\n\nView full details in the [Actions tab](${context.payload.pull_request.html_url}/checks).\n\n*Note: Some checks may have warnings but the pipeline completed.*`
-            });
