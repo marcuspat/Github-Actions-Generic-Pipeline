@@ -1,0 +1,417 @@
+name: Generic Deploy
+
+# Simple, adaptable deployment workflow
+# Customize the deploy steps for your infrastructure
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  prepare:
+    name: 🎯 Prepare Deployment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      version: ${{ steps.version.outputs.version }}
+      should-deploy: ${{ steps.check.outputs.should-deploy }}
+    steps:
+      - name: Determine environment
+        id: env
+        run: |
+          if [ "${{ github.event.inputs.environment }}" != "" ]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=development" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if should deploy
+        id: check
+        run: |
+          # Only deploy from main/master branches or tags
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || \
+             [[ "${{ github.ref }}" == "refs/heads/master" ]] || \
+             [[ "${{ github.ref }}" == refs/tags/* ]] || \
+             [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should-deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "should-deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Display deployment info
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 🚀 Deployment Information
+          
+          - **Environment**: ${{ steps.env.outputs.environment }}
+          - **Version**: ${{ steps.version.outputs.version }}
+          - **Branch**: ${{ github.ref_name }}
+          - **Commit**: ${{ github.sha }}
+          - **Triggered by**: ${{ github.actor }}
+          - **Should Deploy**: ${{ steps.check.outputs.should-deploy }}
+          EOF
+
+  build-docker:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: needs.prepare.outputs.should-deploy == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix={{branch}}-
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.environment }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.environment == 'production' }}
+
+      - name: Check for Dockerfile
+        id: check-dockerfile
+        run: |
+          if [ -f "Dockerfile" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Dockerfile found"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ No Dockerfile found - skipping Docker build"
+          fi
+
+      - name: Build and push Docker image
+        if: steps.check-dockerfile.outputs.exists == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Create deployment manifest
+        run: |
+          mkdir -p deploy
+          cat > deploy/manifest.json <<EOF
+          {
+            "version": "${{ needs.prepare.outputs.version }}",
+            "environment": "${{ needs.prepare.outputs.environment }}",
+            "image": "${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.prepare.outputs.version }}",
+            "commit": "${{ github.sha }}",
+            "branch": "${{ github.ref_name }}",
+            "actor": "${{ github.actor }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: Upload deployment manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-manifest
+          path: deploy/
+          retention-days: 90
+
+  deploy:
+    name: 🚀 Deploy to ${{ needs.prepare.outputs.environment }}
+    runs-on: ubuntu-latest
+    needs: [prepare, build-docker]
+    if: needs.prepare.outputs.should-deploy == 'true'
+    environment:
+      name: ${{ needs.prepare.outputs.environment }}
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download deployment manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: deployment-manifest
+          path: deploy/
+
+      - name: Deploy application
+        id: deploy
+        run: |
+          echo "🚀 Deploying to ${{ needs.prepare.outputs.environment }}"
+          echo "Version: ${{ needs.prepare.outputs.version }}"
+          
+          # ============================================================
+          # CUSTOMIZE THIS SECTION FOR YOUR DEPLOYMENT METHOD
+          # ============================================================
+          
+          # Example: Kubernetes
+          # kubectl set image deployment/myapp myapp=${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.prepare.outputs.version }}
+          
+          # Example: Docker Compose
+          # docker-compose pull
+          # docker-compose up -d
+          
+          # Example: AWS ECS
+          # aws ecs update-service --cluster my-cluster --service my-service --force-new-deployment
+          
+          # Example: Heroku
+          # heroku container:push web --app my-app
+          # heroku container:release web --app my-app
+          
+          # Example: SSH deployment
+          # scp -r ./dist user@server:/var/www/app
+          # ssh user@server 'cd /var/www/app && ./restart.sh'
+          
+          # Example: Serverless
+          # serverless deploy --stage ${{ needs.prepare.outputs.environment }}
+          
+          # Example: Vercel/Netlify (usually auto-deploys from main branch)
+          # These platforms typically handle deployment automatically
+          
+          echo "⚠️ No deployment script configured - add your deployment commands above"
+          
+          # ============================================================
+          
+          # Set deployment URL based on environment
+          case "${{ needs.prepare.outputs.environment }}" in
+            production)
+              echo "url=https://your-domain.com" >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "url=https://staging.your-domain.com" >> $GITHUB_OUTPUT
+              ;;
+            development)
+              echo "url=https://dev.your-domain.com" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Health check
+        continue-on-error: true
+        run: |
+          # Wait for deployment to be ready
+          sleep 10
+          
+          # Check if application is responding
+          # Uncomment and customize for your health endpoint
+          # curl -f ${{ steps.deploy.outputs.url }}/health || exit 1
+          
+          echo "✅ Deployment health check skipped (not configured)"
+
+      - name: Create deployment summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # ✅ Deployment Complete
+          
+          ## 📦 Deployment Details
+          - **Environment**: ${{ needs.prepare.outputs.environment }}
+          - **Version**: ${{ needs.prepare.outputs.version }}
+          - **Image**: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.prepare.outputs.version }}
+          - **URL**: ${{ steps.deploy.outputs.url }}
+          
+          ## 🔍 Deployment Info
+          - **Commit**: ${{ github.sha }}
+          - **Branch**: ${{ github.ref_name }}
+          - **Deployed by**: ${{ github.actor }}
+          - **Timestamp**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## 🔗 Quick Links
+          - [Application](${{ steps.deploy.outputs.url }})
+          - [Container Image](${{ env.REGISTRY }}/${{ github.repository }})
+          
+          ---
+          ⚠️ **Note**: Customize the deployment steps in the workflow file for your infrastructure
+          EOF
+
+  rollback:
+    name: ↩️ Rollback (Manual)
+    runs-on: ubuntu-latest
+    if: failure() && github.event_name != 'workflow_dispatch'
+    needs: [prepare, deploy]
+    steps:
+      - name: Rollback information
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # ⚠️ Deployment Failed
+          
+          Deployment to ${{ needs.prepare.outputs.environment }} failed.
+          
+          ## 🔄 Rollback Options
+          
+          1. **Manual Rollback**: Trigger a deployment of the previous working version
+          2. **Investigate**: Check the deployment logs above
+          3. **Fix and Retry**: Fix the issue and push a new commit
+          
+          ## 📋 Rollback Commands
+          
+          \`\`\`bash
+          # Example: Rollback to previous Docker image
+          # kubectl rollout undo deployment/myapp
+          
+          # Example: Rollback Docker Compose
+          # docker-compose down
+          # docker-compose up -d --build
+          \`\`\`
+          
+          Customize these commands for your infrastructure.
+          EOF
+
+  create-release:
+    name: 📦 Create Release
+    runs-on: ubuntu-latest
+    needs: [prepare, deploy]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          if [ -z "$PREV_TAG" ]; then
+            echo "changelog=Initial release" >> $GITHUB_OUTPUT
+          else
+            CHANGELOG=$(git log $PREV_TAG..HEAD --pretty=format:"- %s (%h)" --no-merges)
+            echo "changelog<<EOF" >> $GITHUB_OUTPUT
+            echo "$CHANGELOG" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body: |
+            ## 🚀 Release ${{ needs.prepare.outputs.version }}
+            
+            ### 📝 Changes
+            ${{ steps.changelog.outputs.changelog }}
+            
+            ### 📦 Deployment
+            - **Environment**: ${{ needs.prepare.outputs.environment }}
+            - **Docker Image**: `${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.prepare.outputs.version }}`
+            
+            ### 🔧 Installation
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.prepare.outputs.version }}
+            ```
+          draft: false
+          prerelease: ${{ contains(needs.prepare.outputs.version, '-rc') || contains(needs.prepare.outputs.version, '-beta') || contains(needs.prepare.outputs.version, '-alpha') }}
+          generate_release_notes: true
+
+  notify:
+    name: 📢 Send Notifications
+    runs-on: ubuntu-latest
+    needs: [prepare, deploy]
+    if: always() && needs.prepare.outputs.should-deploy == 'true'
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [ "${{ needs.deploy.result }}" == "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Prepare notification
+        run: |
+          cat >> notification.txt <<EOF
+          ${{ steps.status.outputs.emoji }} Deployment ${{ steps.status.outputs.status }}
+          
+          Environment: ${{ needs.prepare.outputs.environment }}
+          Version: ${{ needs.prepare.outputs.version }}
+          Repository: ${{ github.repository }}
+          Branch: ${{ github.ref_name }}
+          Commit: ${{ github.sha }}
+          Triggered by: ${{ github.actor }}
+          
+          View details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          
+          cat notification.txt
+
+      # Add your notification integrations here:
+      # 
+      # - name: Send Slack notification
+      #   uses: slackapi/slack-github-action@v1
+      #   with:
+      #     webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #     payload: |
+      #       {
+      #         "text": "$(cat notification.txt)"
+      #       }
+      #
+      # - name: Send Discord notification
+      #   uses: sarisia/actions-status-discord@v1
+      #   with:
+      #     webhook: ${{ secrets.DISCORD_WEBHOOK }}
+      #     status: ${{ steps.status.outputs.status }}
+      #
+      # - name: Send email
+      #   uses: dawidd6/action-send-mail@v3
+      #   with:
+      #     server_address: smtp.gmail.com
+      #     server_port: 465
+      #     username: ${{ secrets.MAIL_USERNAME }}
+      #     password: ${{ secrets.MAIL_PASSWORD }}
+      #     subject: Deployment ${{ steps.status.outputs.status }}
+      #     body: file://notification.txt
+      #     to: team@example.com

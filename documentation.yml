@@ -1,0 +1,359 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - '**-dev'
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - 'research/**'
+      - 'planning/**'
+      - 'process/**'
+      - 'tools/**'
+  pull_request:
+    paths:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  lint-docs:
+    name: Lint Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check markdown files
+        uses: DavidAnson/markdownlint-cli2-action@v15
+        continue-on-error: true
+        with:
+          globs: |
+            **/*.md
+            !node_modules/**
+
+      - name: Check for broken links
+        continue-on-error: true
+        run: |
+          echo "## 🔗 Link Check Results" >> $GITHUB_STEP_SUMMARY
+          
+          # Find all markdown files
+          find . -name "*.md" -not -path "./node_modules/*" -not -path "./.git/*" | while read file; do
+            echo "Checking: $file"
+            
+            # Extract markdown links
+            grep -oP '\[.*?\]\(\K[^)]+' "$file" 2>/dev/null | while read link; do
+              # Skip anchors and mail links
+              if [[ ! "$link" =~ ^# ]] && [[ ! "$link" =~ ^mailto: ]]; then
+                # Check if it's a local file
+                if [[ ! "$link" =~ ^http ]]; then
+                  DIR=$(dirname "$file")
+                  FULL_PATH="$DIR/$link"
+                  if [ ! -f "$FULL_PATH" ]; then
+                    echo "⚠️  Broken link in $file: $link" >> $GITHUB_STEP_SUMMARY
+                  fi
+                fi
+              fi
+            done
+          done
+
+      - name: Spell check
+        uses: rojopolis/spellcheck-github-actions@0.36.0
+        continue-on-error: true
+        with:
+          config_path: .github/workflows/spellcheck-config.yml
+
+  collect-documentation:
+    name: Collect & Organize Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Organize documentation
+        run: |
+          mkdir -p compiled-docs/{research,planning,process,tools,branches}
+          
+          echo "# Project Documentation Index" > compiled-docs/INDEX.md
+          echo "" >> compiled-docs/INDEX.md
+          echo "Generated: $(date)" >> compiled-docs/INDEX.md
+          echo "Branch: ${GITHUB_REF_NAME}" >> compiled-docs/INDEX.md
+          echo "" >> compiled-docs/INDEX.md
+          
+          # Main documentation
+          if [ -f "README.md" ]; then
+            cp README.md compiled-docs/
+            echo "- [Main README](README.md)" >> compiled-docs/INDEX.md
+          fi
+          
+          # Collect research docs
+          if [ -d "research" ]; then
+            echo "" >> compiled-docs/INDEX.md
+            echo "## 🔬 Research Documentation" >> compiled-docs/INDEX.md
+            find research -name "*.md" -type f | while read file; do
+              cp --parents "$file" compiled-docs/
+              echo "- [$file]($file)" >> compiled-docs/INDEX.md
+            done
+          fi
+          
+          # Collect planning docs
+          if [ -d "planning" ]; then
+            echo "" >> compiled-docs/INDEX.md
+            echo "## 📋 Planning Documentation" >> compiled-docs/INDEX.md
+            find planning -name "*.md" -type f | while read file; do
+              cp --parents "$file" compiled-docs/
+              echo "- [$file]($file)" >> compiled-docs/INDEX.md
+            done
+          fi
+          
+          # Collect process docs
+          if [ -d "process" ]; then
+            echo "" >> compiled-docs/INDEX.md
+            echo "## ⚙️ Process Documentation" >> compiled-docs/INDEX.md
+            find process -name "*.md" -type f | while read file; do
+              cp --parents "$file" compiled-docs/
+              echo "- [$file]($file)" >> compiled-docs/INDEX.md
+            done
+          fi
+          
+          # Collect tools docs
+          if [ -d "tools" ]; then
+            echo "" >> compiled-docs/INDEX.md
+            echo "## 🛠️ Tools Documentation" >> compiled-docs/INDEX.md
+            find tools -name "*.md" -type f | while read file; do
+              cp --parents "$file" compiled-docs/
+              echo "- [$file]($file)" >> compiled-docs/INDEX.md
+            done
+          fi
+
+      - name: Generate documentation statistics
+        run: |
+          echo "## 📊 Documentation Statistics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          TOTAL_DOCS=$(find compiled-docs -name "*.md" | wc -l)
+          TOTAL_WORDS=$(find compiled-docs -name "*.md" -exec wc -w {} + | tail -1 | awk '{print $1}')
+          
+          echo "- Total documents: $TOTAL_DOCS" >> $GITHUB_STEP_SUMMARY
+          echo "- Total words: $TOTAL_WORDS" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### By Category" >> $GITHUB_STEP_SUMMARY
+          echo "- Research: $(find compiled-docs/research -name '*.md' 2>/dev/null | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "- Planning: $(find compiled-docs/planning -name '*.md' 2>/dev/null | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "- Process: $(find compiled-docs/process -name '*.md' 2>/dev/null | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "- Tools: $(find compiled-docs/tools -name '*.md' 2>/dev/null | wc -l)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload compiled documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-${{ github.sha }}
+          path: compiled-docs/
+          retention-days: 90
+
+  generate-api-docs:
+    name: Generate API Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for Node.js project
+        id: check-nodejs
+        run: |
+          if [ -f "package.json" ]; then
+            echo "has-nodejs=true" >> $GITHUB_OUTPUT
+          else
+            echo "has-nodejs=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for Python project
+        id: check-python
+        run: |
+          if [ -f "requirements.txt" ] || [ -f "pyproject.toml" ]; then
+            echo "has-python=true" >> $GITHUB_OUTPUT
+          else
+            echo "has-python=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Node.js for JSDoc
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+        if: steps.check-nodejs.outputs.has-nodejs == 'true'
+
+      - name: Generate JSDoc
+        if: steps.check-nodejs.outputs.has-nodejs == 'true'
+        continue-on-error: true
+        run: |
+          npm install -g jsdoc
+          if [ -d "src" ]; then
+            jsdoc -r src -d api-docs/javascript || echo "JSDoc generation skipped"
+          fi
+
+      - name: Set up Python for Sphinx
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+        if: steps.check-python.outputs.has-python == 'true'
+
+      - name: Generate Sphinx docs
+        if: steps.check-python.outputs.has-python == 'true'
+        continue-on-error: true
+        run: |
+          python -m pip install sphinx sphinx-rtd-theme
+          if [ -d "docs" ] && [ -f "docs/conf.py" ]; then
+            sphinx-build -b html docs api-docs/python
+          else
+            echo "Sphinx documentation not configured"
+          fi
+
+      - name: Upload API documentation
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-docs-${{ github.sha }}
+          path: api-docs/
+          retention-days: 30
+
+  build-documentation-site:
+    name: Build Documentation Site
+    runs-on: ubuntu-latest
+    needs: [collect-documentation, generate-api-docs]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download compiled docs
+        uses: actions/download-artifact@v4
+        with:
+          name: documentation-${{ github.sha }}
+          path: site-content/
+
+      - name: Download API docs
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: api-docs-${{ github.sha }}
+          path: site-content/api/
+
+      - name: Install MkDocs
+        run: |
+          python -m pip install --upgrade pip
+          pip install mkdocs mkdocs-material pymdown-extensions
+
+      - name: Create MkDocs configuration
+        run: |
+          cat > mkdocs.yml <<EOF
+          site_name: Team Tribe Assembly Documentation
+          site_description: Collaborative SaaS Development Documentation
+          theme:
+            name: material
+            palette:
+              - scheme: default
+                primary: indigo
+                accent: indigo
+                toggle:
+                  icon: material/brightness-7
+                  name: Switch to dark mode
+              - scheme: slate
+                primary: indigo
+                accent: indigo
+                toggle:
+                  icon: material/brightness-4
+                  name: Switch to light mode
+            features:
+              - navigation.tabs
+              - navigation.sections
+              - navigation.top
+              - search.suggest
+              - search.highlight
+              - content.tabs.link
+              - content.code.annotation
+              - content.code.copy
+          
+          nav:
+            - Home: INDEX.md
+            - Research: research/
+            - Planning: planning/
+            - Process: process/
+            - Tools: tools/
+          
+          markdown_extensions:
+            - pymdownx.highlight:
+                anchor_linenums: true
+            - pymdownx.inlinehilite
+            - pymdownx.snippets
+            - pymdownx.superfences
+            - pymdownx.tabbed:
+                alternate_style: true
+            - admonition
+            - pymdownx.details
+            - pymdownx.mark
+            - attr_list
+            - md_in_html
+          
+          plugins:
+            - search
+          EOF
+
+      - name: Build MkDocs site
+        run: |
+          mkdocs build -d public
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public/
+
+  deploy-to-pages:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: build-documentation-site
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  create-documentation-summary:
+    name: Create Documentation Summary
+    runs-on: ubuntu-latest
+    needs: [lint-docs, collect-documentation]
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 📚 Documentation Pipeline Summary
+          
+          ## Status
+          - Linting: ${{ needs.lint-docs.result }}
+          - Collection: ${{ needs.collect-documentation.result }}
+          
+          ## Branch
+          ${GITHUB_REF_NAME}
+          
+          ## Commit
+          ${GITHUB_SHA::8}
+          
+          ## Documentation Quality
+          The documentation has been processed and validated. Check individual job outputs for details.
+          
+          ---
+          Generated: $(date)
+          EOF

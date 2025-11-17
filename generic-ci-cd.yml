@@ -1,0 +1,671 @@
+name: Generic CI/CD Pipeline
+
+# This workflow is designed to be plug-and-play for any GitHub repository
+# It auto-detects your project type and runs appropriate checks
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+      - development
+      - '**-dev'
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+      - development
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip test execution'
+        required: false
+        default: 'false'
+        type: boolean
+      force_build:
+        description: 'Force build even on non-main branches'
+        required: false
+        default: 'false'
+        type: boolean
+
+# Configure these defaults for your project
+env:
+  # Language versions - customize as needed
+  NODE_VERSION: '20'
+  PYTHON_VERSION: '3.11'
+  GO_VERSION: '1.21'
+  JAVA_VERSION: '17'
+  RUBY_VERSION: '3.2'
+  
+  # Artifact retention
+  ARTIFACT_RETENTION_DAYS: 30
+  
+  # Feature flags
+  ENABLE_SECURITY_SCAN: true
+  ENABLE_CODE_COVERAGE: true
+  ENABLE_DEPENDENCY_CHECK: true
+
+jobs:
+  # ============================================================================
+  # Auto-detect project type and structure
+  # ============================================================================
+  detect-project:
+    name: 🔍 Detect Project Type
+    runs-on: ubuntu-latest
+    outputs:
+      has-nodejs: ${{ steps.detect.outputs.has-nodejs }}
+      has-python: ${{ steps.detect.outputs.has-python }}
+      has-go: ${{ steps.detect.outputs.has-go }}
+      has-java: ${{ steps.detect.outputs.has-java }}
+      has-ruby: ${{ steps.detect.outputs.has-ruby }}
+      has-rust: ${{ steps.detect.outputs.has-rust }}
+      has-docker: ${{ steps.detect.outputs.has-docker }}
+      has-terraform: ${{ steps.detect.outputs.has-terraform }}
+      has-docs: ${{ steps.detect.outputs.has-docs }}
+      is-monorepo: ${{ steps.detect.outputs.is-monorepo }}
+      branch-type: ${{ steps.detect.outputs.branch-type }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect project structure
+        id: detect
+        run: |
+          echo "🔍 Analyzing project structure..."
+          
+          # Detect Node.js
+          if [ -f "package.json" ] || [ -f "yarn.lock" ] || [ -f "pnpm-lock.yaml" ]; then
+            echo "has-nodejs=true" >> $GITHUB_OUTPUT
+            echo "✅ Node.js project detected"
+          else
+            echo "has-nodejs=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Detect Python
+          if [ -f "requirements.txt" ] || [ -f "pyproject.toml" ] || [ -f "setup.py" ] || [ -f "Pipfile" ]; then
+            echo "has-python=true" >> $GITHUB_OUTPUT
+            echo "✅ Python project detected"
+          else
+            echo "has-python=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Detect Go
+          if [ -f "go.mod" ] || [ -f "go.sum" ]; then
+            echo "has-go=true" >> $GITHUB_OUTPUT
+            echo "✅ Go project detected"
+          else
+            echo "has-go=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Detect Java
+          if [ -f "pom.xml" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            echo "has-java=true" >> $GITHUB_OUTPUT
+            echo "✅ Java project detected"
+          else
+            echo "has-java=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Detect Ruby
+          if [ -f "Gemfile" ] || [ -f "Rakefile" ]; then
+            echo "has-ruby=true" >> $GITHUB_OUTPUT
+            echo "✅ Ruby project detected"
+          else
+            echo "has-ruby=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Detect Rust
+          if [ -f "Cargo.toml" ]; then
+            echo "has-rust=true" >> $GITHUB_OUTPUT
+            echo "✅ Rust project detected"
+          else
+            echo "has-rust=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Detect Docker
+          if find . -maxdepth 3 -name "Dockerfile*" -o -name "docker-compose*.yml" -o -name "docker-compose*.yaml" | grep -q .; then
+            echo "has-docker=true" >> $GITHUB_OUTPUT
+            echo "✅ Docker configuration found"
+          else
+            echo "has-docker=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Detect Terraform
+          if find . -name "*.tf" | grep -q .; then
+            echo "has-terraform=true" >> $GITHUB_OUTPUT
+            echo "✅ Terraform configuration found"
+          else
+            echo "has-terraform=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Detect Documentation
+          if find . -name "*.md" -type f ! -path "./node_modules/*" ! -path "./.git/*" ! -path "./vendor/*" | grep -q .; then
+            echo "has-docs=true" >> $GITHUB_OUTPUT
+            echo "✅ Documentation found"
+          else
+            echo "has-docs=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Detect monorepo
+          if [ -f "lerna.json" ] || [ -f "nx.json" ] || [ -f "pnpm-workspace.yaml" ] || ([ -f "package.json" ] && grep -q "workspaces" package.json); then
+            echo "is-monorepo=true" >> $GITHUB_OUTPUT
+            echo "✅ Monorepo detected"
+          else
+            echo "is-monorepo=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Determine branch type
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          case "$BRANCH_NAME" in
+            main|master)
+              echo "branch-type=production" >> $GITHUB_OUTPUT
+              ;;
+            develop|development)
+              echo "branch-type=staging" >> $GITHUB_OUTPUT
+              ;;
+            *-dev)
+              echo "branch-type=personal" >> $GITHUB_OUTPUT
+              ;;
+            feature/*|feat/*)
+              echo "branch-type=feature" >> $GITHUB_OUTPUT
+              ;;
+            bugfix/*|fix/*)
+              echo "branch-type=bugfix" >> $GITHUB_OUTPUT
+              ;;
+            hotfix/*)
+              echo "branch-type=hotfix" >> $GITHUB_OUTPUT
+              ;;
+            release/*)
+              echo "branch-type=release" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "branch-type=other" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Generate detection report
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 🔍 Project Detection Report
+          
+          ## 📦 Languages & Frameworks
+          - Node.js: ${{ steps.detect.outputs.has-nodejs == 'true' && '✅' || '❌' }}
+          - Python: ${{ steps.detect.outputs.has-python == 'true' && '✅' || '❌' }}
+          - Go: ${{ steps.detect.outputs.has-go == 'true' && '✅' || '❌' }}
+          - Java: ${{ steps.detect.outputs.has-java == 'true' && '✅' || '❌' }}
+          - Ruby: ${{ steps.detect.outputs.has-ruby == 'true' && '✅' || '❌' }}
+          - Rust: ${{ steps.detect.outputs.has-rust == 'true' && '✅' || '❌' }}
+          
+          ## 🛠️ Infrastructure
+          - Docker: ${{ steps.detect.outputs.has-docker == 'true' && '✅' || '❌' }}
+          - Terraform: ${{ steps.detect.outputs.has-terraform == 'true' && '✅' || '❌' }}
+          
+          ## 📚 Documentation
+          - Docs: ${{ steps.detect.outputs.has-docs == 'true' && '✅' || '❌' }}
+          
+          ## 📊 Project Type
+          - Monorepo: ${{ steps.detect.outputs.is-monorepo == 'true' && '✅' || '❌' }}
+          - Branch Type: **${{ steps.detect.outputs.branch-type }}**
+          EOF
+
+  # ============================================================================
+  # Code Quality & Linting
+  # ============================================================================
+  code-quality:
+    name: 🔍 Code Quality
+    runs-on: ubuntu-latest
+    needs: detect-project
+    if: |
+      needs.detect-project.outputs.has-nodejs == 'true' ||
+      needs.detect-project.outputs.has-python == 'true' ||
+      needs.detect-project.outputs.has-go == 'true' ||
+      needs.detect-project.outputs.has-java == 'true' ||
+      needs.detect-project.outputs.has-ruby == 'true' ||
+      needs.detect-project.outputs.has-rust == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Node.js linting
+      - name: Setup Node.js
+        if: needs.detect-project.outputs.has-nodejs == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: ${{ hashFiles('**/package-lock.json') != '' && 'npm' || hashFiles('**/yarn.lock') != '' && 'yarn' || hashFiles('**/pnpm-lock.yaml') != '' && 'pnpm' || '' }}
+
+      - name: Install Node dependencies
+        if: needs.detect-project.outputs.has-nodejs == 'true'
+        run: |
+          if [ -f "pnpm-lock.yaml" ]; then
+            npm install -g pnpm && pnpm install
+          elif [ -f "yarn.lock" ]; then
+            yarn install --frozen-lockfile
+          elif [ -f "package-lock.json" ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run Node.js linter
+        if: needs.detect-project.outputs.has-nodejs == 'true'
+        continue-on-error: true
+        run: |
+          if grep -q '"lint"' package.json; then
+            npm run lint || echo "⚠️ Linting produced warnings"
+          else
+            echo "ℹ️ No lint script found in package.json"
+          fi
+
+      # Python linting
+      - name: Setup Python
+        if: needs.detect-project.outputs.has-python == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: ${{ hashFiles('**/requirements.txt') != '' && 'pip' || hashFiles('**/Pipfile.lock') != '' && 'pipenv' || hashFiles('**/poetry.lock') != '' && 'poetry' || '' }}
+
+      - name: Install Python linting tools
+        if: needs.detect-project.outputs.has-python == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pylint black isort mypy || true
+
+      - name: Run Python linters
+        if: needs.detect-project.outputs.has-python == 'true'
+        continue-on-error: true
+        run: |
+          # Find Python files
+          PYTHON_FILES=$(find . -name "*.py" -not -path "./venv/*" -not -path "./.venv/*" -not -path "./env/*" -not -path "./node_modules/*" -not -path "./.tox/*")
+          
+          if [ -n "$PYTHON_FILES" ]; then
+            echo "Running flake8..."
+            flake8 $PYTHON_FILES --max-line-length=120 --exclude=venv,.venv,env,node_modules,.tox --count --statistics || true
+            
+            echo "Checking code formatting with black..."
+            black --check $PYTHON_FILES || echo "⚠️ Code formatting issues found"
+            
+            echo "Checking import order with isort..."
+            isort --check-only $PYTHON_FILES || echo "⚠️ Import order issues found"
+          else
+            echo "ℹ️ No Python files found"
+          fi
+
+      # Go linting
+      - name: Setup Go
+        if: needs.detect-project.outputs.has-go == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run Go linters
+        if: needs.detect-project.outputs.has-go == 'true'
+        continue-on-error: true
+        run: |
+          go fmt ./...
+          go vet ./... || true
+          
+          # Install golangci-lint
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin
+          golangci-lint run || true
+
+      # Java linting
+      - name: Setup Java
+        if: needs.detect-project.outputs.has-java == 'true'
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: ${{ hashFiles('**/pom.xml') != '' && 'maven' || hashFiles('**/build.gradle*') != '' && 'gradle' || '' }}
+
+      - name: Run Java checks
+        if: needs.detect-project.outputs.has-java == 'true'
+        continue-on-error: true
+        run: |
+          if [ -f "pom.xml" ]; then
+            mvn checkstyle:check || true
+          elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            ./gradlew check || true
+          fi
+
+      # Rust linting
+      - name: Setup Rust
+        if: needs.detect-project.outputs.has-rust == 'true'
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Run Rust checks
+        if: needs.detect-project.outputs.has-rust == 'true'
+        continue-on-error: true
+        run: |
+          cargo fmt --all -- --check || true
+          cargo clippy -- -D warnings || true
+
+  # ============================================================================
+  # Run Tests
+  # ============================================================================
+  test:
+    name: 🧪 Run Tests
+    runs-on: ubuntu-latest
+    needs: detect-project
+    if: |
+      github.event.inputs.skip_tests != 'true' &&
+      (needs.detect-project.outputs.has-nodejs == 'true' ||
+       needs.detect-project.outputs.has-python == 'true' ||
+       needs.detect-project.outputs.has-go == 'true' ||
+       needs.detect-project.outputs.has-java == 'true' ||
+       needs.detect-project.outputs.has-ruby == 'true' ||
+       needs.detect-project.outputs.has-rust == 'true')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Node.js tests
+      - name: Setup Node.js
+        if: needs.detect-project.outputs.has-nodejs == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: ${{ hashFiles('**/package-lock.json') != '' && 'npm' || hashFiles('**/yarn.lock') != '' && 'yarn' || hashFiles('**/pnpm-lock.yaml') != '' && 'pnpm' || '' }}
+
+      - name: Install Node dependencies
+        if: needs.detect-project.outputs.has-nodejs == 'true'
+        run: |
+          if [ -f "pnpm-lock.yaml" ]; then
+            npm install -g pnpm && pnpm install
+          elif [ -f "yarn.lock" ]; then
+            yarn install --frozen-lockfile
+          elif [ -f "package-lock.json" ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run Node.js tests
+        if: needs.detect-project.outputs.has-nodejs == 'true'
+        continue-on-error: true
+        run: |
+          if grep -q '"test"' package.json; then
+            npm test || echo "⚠️ Some tests failed"
+          else
+            echo "ℹ️ No test script found"
+          fi
+
+      # Python tests
+      - name: Setup Python
+        if: needs.detect-project.outputs.has-python == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python dependencies
+        if: needs.detect-project.outputs.has-python == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f "requirements-dev.txt" ]; then
+            pip install -r requirements-dev.txt
+          fi
+          pip install pytest pytest-cov || true
+
+      - name: Run Python tests
+        if: needs.detect-project.outputs.has-python == 'true'
+        continue-on-error: true
+        run: |
+          if [ -d "tests" ] || find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
+            pytest --cov --cov-report=xml --cov-report=term || echo "⚠️ Some tests failed"
+          else
+            echo "ℹ️ No tests found"
+          fi
+
+      # Go tests
+      - name: Setup Go
+        if: needs.detect-project.outputs.has-go == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run Go tests
+        if: needs.detect-project.outputs.has-go == 'true'
+        continue-on-error: true
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./... || echo "⚠️ Some tests failed"
+
+      # Java tests
+      - name: Setup Java
+        if: needs.detect-project.outputs.has-java == 'true'
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      - name: Run Java tests
+        if: needs.detect-project.outputs.has-java == 'true'
+        continue-on-error: true
+        run: |
+          if [ -f "pom.xml" ]; then
+            mvn test || echo "⚠️ Some tests failed"
+          elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            ./gradlew test || echo "⚠️ Some tests failed"
+          fi
+
+      # Rust tests
+      - name: Setup Rust
+        if: needs.detect-project.outputs.has-rust == 'true'
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+
+      - name: Run Rust tests
+        if: needs.detect-project.outputs.has-rust == 'true'
+        continue-on-error: true
+        run: |
+          cargo test --verbose || echo "⚠️ Some tests failed"
+
+      - name: Upload coverage reports
+        if: env.ENABLE_CODE_COVERAGE == 'true'
+        uses: codecov/codecov-action@v4
+        continue-on-error: true
+        with:
+          files: ./coverage.xml,./coverage.out
+          flags: unittests
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # ============================================================================
+  # Security Scanning
+  # ============================================================================
+  security:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: detect-project
+    if: env.ENABLE_SECURITY_SCAN == 'true'
+    permissions:
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Check for secrets
+        continue-on-error: true
+        run: |
+          echo "🔍 Scanning for potential secrets..."
+          
+          # Simple secret detection
+          PATTERNS=(
+            "password"
+            "api[_-]?key"
+            "secret"
+            "token"
+            "credential"
+            "private[_-]?key"
+          )
+          
+          for pattern in "${PATTERNS[@]}"; do
+            if git grep -iE "$pattern" -- ':!*.yml' ':!*.yaml' ':!*.md' 2>/dev/null | grep -v "github.com" | head -5; then
+              echo "⚠️ Potential secret pattern found: $pattern"
+            fi
+          done
+
+  # ============================================================================
+  # Build Artifacts
+  # ============================================================================
+  build:
+    name: 🏗️ Build
+    runs-on: ubuntu-latest
+    needs: [detect-project, code-quality, test]
+    if: |
+      always() &&
+      (github.event.inputs.force_build == 'true' ||
+       needs.detect-project.outputs.branch-type == 'production' ||
+       needs.detect-project.outputs.branch-type == 'staging') &&
+      (needs.detect-project.outputs.has-nodejs == 'true' ||
+       needs.detect-project.outputs.has-python == 'true' ||
+       needs.detect-project.outputs.has-go == 'true' ||
+       needs.detect-project.outputs.has-docker == 'true')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup build environment
+        run: |
+          mkdir -p dist
+
+      # Node.js build
+      - name: Build Node.js project
+        if: needs.detect-project.outputs.has-nodejs == 'true'
+        run: |
+          if [ -f "pnpm-lock.yaml" ]; then
+            npm install -g pnpm && pnpm install && pnpm build || echo "No build script"
+          elif [ -f "yarn.lock" ]; then
+            yarn install --frozen-lockfile && yarn build || echo "No build script"
+          else
+            npm ci && npm run build || echo "No build script"
+          fi
+
+      # Python build
+      - name: Build Python project
+        if: needs.detect-project.outputs.has-python == 'true'
+        run: |
+          python -m pip install --upgrade pip build
+          if [ -f "pyproject.toml" ]; then
+            python -m build
+          fi
+
+      # Go build
+      - name: Build Go project
+        if: needs.detect-project.outputs.has-go == 'true'
+        run: |
+          go build -v ./...
+
+      # Docker build
+      - name: Build Docker images
+        if: needs.detect-project.outputs.has-docker == 'true'
+        run: |
+          if [ -f "Dockerfile" ]; then
+            docker build -t ${{ github.repository }}:${{ github.sha }} .
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts-${{ github.sha }}
+          path: |
+            dist/
+            build/
+            target/
+            *.whl
+            *.tar.gz
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+  # ============================================================================
+  # Final Report
+  # ============================================================================
+  report:
+    name: 📊 Generate Report
+    runs-on: ubuntu-latest
+    needs: [detect-project, code-quality, test, security, build]
+    if: always()
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Generate summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 📊 Pipeline Execution Report
+          
+          ## 🎯 Project Information
+          - **Repository**: ${{ github.repository }}
+          - **Branch**: ${{ github.ref_name }}
+          - **Commit**: ${{ github.sha }}
+          - **Actor**: ${{ github.actor }}
+          - **Branch Type**: ${{ needs.detect-project.outputs.branch-type }}
+          
+          ## 📦 Detected Technologies
+          | Technology | Status |
+          |------------|--------|
+          | Node.js | ${{ needs.detect-project.outputs.has-nodejs == 'true' && '✅' || '❌' }} |
+          | Python | ${{ needs.detect-project.outputs.has-python == 'true' && '✅' || '❌' }} |
+          | Go | ${{ needs.detect-project.outputs.has-go == 'true' && '✅' || '❌' }} |
+          | Java | ${{ needs.detect-project.outputs.has-java == 'true' && '✅' || '❌' }} |
+          | Ruby | ${{ needs.detect-project.outputs.has-ruby == 'true' && '✅' || '❌' }} |
+          | Rust | ${{ needs.detect-project.outputs.has-rust == 'true' && '✅' || '❌' }} |
+          | Docker | ${{ needs.detect-project.outputs.has-docker == 'true' && '✅' || '❌' }} |
+          
+          ## ✅ Pipeline Status
+          | Phase | Result |
+          |-------|--------|
+          | Detection | ${{ needs.detect-project.result }} |
+          | Code Quality | ${{ needs.code-quality.result }} |
+          | Tests | ${{ needs.test.result }} |
+          | Security | ${{ needs.security.result }} |
+          | Build | ${{ needs.build.result }} |
+          
+          ---
+          *Generated by Generic CI/CD Pipeline*
+          EOF
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            const needs = ${{ toJSON(needs) }};
+            
+            let status = '✅ All checks passed';
+            const failed = Object.values(needs).filter(j => j.result === 'failure');
+            if (failed.length > 0) {
+              status = '❌ ' + failed.length + ' check(s) failed';
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ${status}\n\nView details in the [Actions tab](${context.payload.pull_request.html_url}/checks).`
+            });

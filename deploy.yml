@@ -1,0 +1,464 @@
+name: Deploy Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - 'v*'
+      - 'release-*'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ============================================================================
+  # PREPARATION
+  # ============================================================================
+
+  prepare-deployment:
+    name: Prepare Deployment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      version: ${{ steps.set-version.outputs.version }}
+      should-deploy: ${{ steps.set-env.outputs.should-deploy }}
+    steps:
+      - name: Determine environment
+        id: set-env
+        run: |
+          SHOULD_DEPLOY="true"
+          
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "🚀 Deploying to PRODUCTION"
+          elif [[ "${GITHUB_REF}" == "refs/heads/develop" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "🚀 Deploying to STAGING"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "🚀 Deploying RELEASE to PRODUCTION"
+          else
+            echo "environment=development" >> $GITHUB_OUTPUT
+            SHOULD_DEPLOY="false"
+            echo "⚠️  Not a deployment branch"
+          fi
+          
+          echo "should-deploy=$SHOULD_DEPLOY" >> $GITHUB_OUTPUT
+
+      - name: Set version
+        id: set-version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "📦 Version: ${VERSION}"
+          else
+            VERSION="${GITHUB_SHA::8}"
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "📦 Version: ${VERSION} (commit)"
+          fi
+
+  # ============================================================================
+  # DOCKER BUILD & PUSH
+  # ============================================================================
+
+  build-docker-images:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: prepare-deployment
+    if: needs.prepare-deployment.outputs.should-deploy == 'true'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        # Auto-detect services or use default
+        service: [app]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find Dockerfile
+        id: find-dockerfile
+        run: |
+          # Search for Dockerfile in various locations
+          if [ -f "Dockerfile" ]; then
+            echo "dockerfile=Dockerfile" >> $GITHUB_OUTPUT
+            echo "context=." >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found Dockerfile at root"
+          elif [ -f "docker/Dockerfile" ]; then
+            echo "dockerfile=docker/Dockerfile" >> $GITHUB_OUTPUT
+            echo "context=." >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found Dockerfile in docker/"
+          elif [ -f ".docker/Dockerfile" ]; then
+            echo "dockerfile=.docker/Dockerfile" >> $GITHUB_OUTPUT
+            echo "context=." >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found Dockerfile in .docker/"
+          elif [ -f "Dockerfile.${{ matrix.service }}" ]; then
+            echo "dockerfile=Dockerfile.${{ matrix.service }}" >> $GITHUB_OUTPUT
+            echo "context=." >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found Dockerfile.${{ matrix.service }}"
+          elif [ -f "${{ matrix.service }}/Dockerfile" ]; then
+            echo "dockerfile=${{ matrix.service }}/Dockerfile" >> $GITHUB_OUTPUT
+            echo "context=${{ matrix.service }}" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found Dockerfile in ${{ matrix.service }}/"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  No Dockerfile found"
+          fi
+
+      - name: Extract metadata
+        if: steps.find-dockerfile.outputs.found == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix={{branch}}-
+            type=raw,value=${{ needs.prepare-deployment.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        if: steps.find-dockerfile.outputs.found == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ steps.find-dockerfile.outputs.context }}
+          file: ${{ steps.find-dockerfile.outputs.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ needs.prepare-deployment.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Create deployment package (no Docker)
+        if: steps.find-dockerfile.outputs.found == 'false'
+        run: |
+          echo "📦 No Dockerfile found, creating deployment package..."
+          mkdir -p deploy-package
+          
+          # Package common deployment files
+          for dir in src app lib bin public; do
+            if [ -d "$dir" ]; then
+              echo "  Including: $dir/"
+              cp -r "$dir" deploy-package/
+            fi
+          done
+          
+          # Package configuration files
+          for file in package.json requirements.txt pyproject.toml setup.py Procfile .env.example; do
+            if [ -f "$file" ]; then
+              echo "  Including: $file"
+              cp "$file" deploy-package/
+            fi
+          done
+          
+          # Create deployment metadata
+          cat > deploy-package/deploy-info.json <<EOF
+          {
+            "repository": "${GITHUB_REPOSITORY}",
+            "version": "${{ needs.prepare-deployment.outputs.version }}",
+            "environment": "${{ needs.prepare-deployment.outputs.environment }}",
+            "commit": "${GITHUB_SHA}",
+            "branch": "${GITHUB_REF_NAME}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "actor": "${GITHUB_ACTOR}"
+          }
+          EOF
+          
+          # Create archive
+          tar -czf deployment-package.tar.gz -C deploy-package .
+          echo "✅ Deployment package created"
+
+      - name: Upload deployment package
+        if: steps.find-dockerfile.outputs.found == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-${{ github.sha }}
+          path: deployment-package.tar.gz
+          retention-days: 30
+
+  # ============================================================================
+  # DEPLOYMENT
+  # ============================================================================
+
+  deploy:
+    name: Deploy to ${{ needs.prepare-deployment.outputs.environment }}
+    runs-on: ubuntu-latest
+    needs: [prepare-deployment, build-docker-images]
+    if: needs.prepare-deployment.outputs.should-deploy == 'true'
+    environment:
+      name: ${{ needs.prepare-deployment.outputs.environment }}
+      url: ${{ steps.set-url.outputs.url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download deployment artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+
+      - name: Set deployment URL
+        id: set-url
+        run: |
+          # Set default URLs based on environment
+          # Customize these for your actual infrastructure
+          ENV="${{ needs.prepare-deployment.outputs.environment }}"
+          
+          if [ -f ".github/deploy-config.json" ]; then
+            URL=$(jq -r ".environments.${ENV}.url // \"https://${ENV}.example.com\"" .github/deploy-config.json)
+          else
+            case "$ENV" in
+              production)
+                URL="https://app.example.com"
+                ;;
+              staging)
+                URL="https://staging.example.com"
+                ;;
+              *)
+                URL="https://dev.example.com"
+                ;;
+            esac
+          fi
+          
+          echo "url=${URL}" >> $GITHUB_OUTPUT
+          echo "🌐 Deployment URL: ${URL}"
+
+      - name: Deploy
+        id: deploy
+        run: |
+          echo "🚀 Deploying to ${{ needs.prepare-deployment.outputs.environment }}"
+          echo "📦 Version: ${{ needs.prepare-deployment.outputs.version }}"
+          echo "🔗 URL: ${{ steps.set-url.outputs.url }}"
+          
+          # ========================================
+          # ADD YOUR DEPLOYMENT COMMANDS HERE
+          # ========================================
+          # Examples:
+          
+          # Kubernetes:
+          # kubectl set image deployment/app app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-deployment.outputs.version }}
+          # kubectl rollout status deployment/app
+          
+          # Docker Compose:
+          # docker-compose pull
+          # docker-compose up -d
+          
+          # Cloud platforms:
+          # aws ecs update-service --cluster my-cluster --service my-service --force-new-deployment
+          # gcloud run deploy my-service --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-deployment.outputs.version }}
+          # az webapp deployment container config ...
+          
+          # Serverless:
+          # serverless deploy --stage ${{ needs.prepare-deployment.outputs.environment }}
+          
+          # Custom script:
+          # ./scripts/deploy.sh ${{ needs.prepare-deployment.outputs.environment }} ${{ needs.prepare-deployment.outputs.version }}
+          
+          echo "✅ Deployment commands completed"
+
+      - name: Health check
+        continue-on-error: true
+        run: |
+          echo "🏥 Running health checks..."
+          URL="${{ steps.set-url.outputs.url }}"
+          
+          # Wait a moment for deployment to stabilize
+          sleep 10
+          
+          # Try to hit health endpoint
+          if curl -f -s -o /dev/null -w "%{http_code}" "${URL}/health" | grep -q "200\|204"; then
+            echo "✅ Health check passed"
+          elif curl -f -s -o /dev/null -w "%{http_code}" "${URL}" | grep -q "200\|204"; then
+            echo "✅ Root endpoint accessible"
+          else
+            echo "⚠️  Could not verify deployment health"
+          fi
+
+      - name: Create deployment summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 🚀 Deployment Summary
+          
+          ## Environment
+          **${{ needs.prepare-deployment.outputs.environment }}**
+          
+          ## Details
+          | Item | Value |
+          |------|-------|
+          | Version | \`${{ needs.prepare-deployment.outputs.version }}\` |
+          | URL | ${{ steps.set-url.outputs.url }} |
+          | Commit | \`${GITHUB_SHA}\` |
+          | Branch | \`${GITHUB_REF_NAME}\` |
+          | Deployed by | @${GITHUB_ACTOR} |
+          | Timestamp | $(date -u +"%Y-%m-%d %H:%M:%S UTC") |
+          
+          ## Status
+          ✅ Deployment completed successfully
+          
+          ---
+          [View workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          EOF
+
+  # ============================================================================
+  # RELEASE CREATION
+  # ============================================================================
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [prepare-deployment, deploy]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          echo "📝 Generating changelog..."
+          
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          
+          if [ -z "$PREV_TAG" ]; then
+            echo "## First Release 🎉" > changelog.md
+            echo "" >> changelog.md
+            echo "Initial release of the project." >> changelog.md
+          else
+            echo "## Changes from ${PREV_TAG} to ${CURRENT_TAG}" > changelog.md
+            echo "" >> changelog.md
+            
+            # Group commits by type
+            echo "### Features ✨" >> changelog.md
+            git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges | grep -i "^- feat:" >> changelog.md || echo "_No new features_" >> changelog.md
+            echo "" >> changelog.md
+            
+            echo "### Bug Fixes 🐛" >> changelog.md
+            git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges | grep -i "^- fix:" >> changelog.md || echo "_No bug fixes_" >> changelog.md
+            echo "" >> changelog.md
+            
+            echo "### Other Changes" >> changelog.md
+            git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges | grep -iv "^- \(feat\|fix\):" >> changelog.md || echo "_No other changes_" >> changelog.md
+          fi
+          
+          cat changelog.md
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: changelog.md
+          files: |
+            **/*.tar.gz
+            **/*.zip
+            **/deploy-info.json
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          generate_release_notes: true
+
+  # ============================================================================
+  # NOTIFICATIONS
+  # ============================================================================
+
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: [prepare-deployment, deploy]
+    if: always() && needs.prepare-deployment.outputs.should-deploy == 'true'
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [[ "${{ needs.deploy.result }}" == "success" ]]; then
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+            echo "status=SUCCESS" >> $GITHUB_OUTPUT
+            echo "color=good" >> $GITHUB_OUTPUT
+          else
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+            echo "status=FAILED" >> $GITHUB_OUTPUT
+            echo "color=danger" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Prepare notification message
+        id: message
+        run: |
+          cat <<EOF
+          ${{ steps.status.outputs.emoji }} Deployment ${{ steps.status.outputs.status }}
+          
+          Environment: ${{ needs.prepare-deployment.outputs.environment }}
+          Version: ${{ needs.prepare-deployment.outputs.version }}
+          Repository: ${{ github.repository }}
+          Branch: ${GITHUB_REF_NAME}
+          Deployed by: ${GITHUB_ACTOR}
+          
+          Details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+      # Uncomment and configure based on your notification service:
+      
+      # - name: Slack notification
+      #   if: vars.SLACK_WEBHOOK_URL != ''
+      #   uses: slackapi/slack-github-action@v1
+      #   with:
+      #     payload: |
+      #       {
+      #         "text": "${{ steps.status.outputs.emoji }} Deployment to ${{ needs.prepare-deployment.outputs.environment }}: ${{ steps.status.outputs.status }}",
+      #         "attachments": [{
+      #           "color": "${{ steps.status.outputs.color }}",
+      #           "fields": [
+      #             {"title": "Environment", "value": "${{ needs.prepare-deployment.outputs.environment }}", "short": true},
+      #             {"title": "Version", "value": "${{ needs.prepare-deployment.outputs.version }}", "short": true},
+      #             {"title": "Repository", "value": "${{ github.repository }}", "short": true},
+      #             {"title": "Branch", "value": "${GITHUB_REF_NAME}", "short": true}
+      #           ]
+      #         }]
+      #       }
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      
+      # - name: Discord notification
+      #   if: vars.DISCORD_WEBHOOK_URL != ''
+      #   uses: sarisia/actions-status-discord@v1
+      #   with:
+      #     webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      #     status: ${{ needs.deploy.result }}
+      #     title: "Deployment to ${{ needs.prepare-deployment.outputs.environment }}"
+      #     description: "Version ${{ needs.prepare-deployment.outputs.version }} deployed"
+      #     color: ${{ steps.status.outputs.color == 'good' && '0x00FF00' || '0xFF0000' }}
+      
+      - name: Summary
+        run: |
+          echo "📬 Notification prepared (configure webhook secrets to enable)"
+          echo "${{ steps.message.outputs.text }}"

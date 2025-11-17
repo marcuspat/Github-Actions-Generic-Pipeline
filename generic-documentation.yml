@@ -1,0 +1,530 @@
+name: Generic Documentation
+
+# Auto-detects and processes documentation for any project
+# Supports: Markdown, Sphinx, JSDoc, Javadoc, RustDoc, GoDoc, etc.
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - 'documentation/**'
+      - 'README*'
+  pull_request:
+    paths:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  detect-docs:
+    name: 🔍 Detect Documentation
+    runs-on: ubuntu-latest
+    outputs:
+      has-markdown: ${{ steps.detect.outputs.has-markdown }}
+      has-sphinx: ${{ steps.detect.outputs.has-sphinx }}
+      has-mkdocs: ${{ steps.detect.outputs.has-mkdocs }}
+      has-jsdoc: ${{ steps.detect.outputs.has-jsdoc }}
+      has-typedoc: ${{ steps.detect.outputs.has-typedoc }}
+      has-javadoc: ${{ steps.detect.outputs.has-javadoc }}
+      has-rustdoc: ${{ steps.detect.outputs.has-rustdoc }}
+      has-godoc: ${{ steps.detect.outputs.has-godoc }}
+      docs-dir: ${{ steps.detect.outputs.docs-dir }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect documentation types
+        id: detect
+        run: |
+          # Check for markdown files
+          if find . -name "*.md" ! -path "./node_modules/*" ! -path "./.git/*" | head -1 | grep -q .; then
+            echo "has-markdown=true" >> $GITHUB_OUTPUT
+            echo "✅ Markdown files found"
+          else
+            echo "has-markdown=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check for Sphinx
+          if [ -f "docs/conf.py" ] || [ -f "doc/conf.py" ]; then
+            echo "has-sphinx=true" >> $GITHUB_OUTPUT
+            echo "✅ Sphinx documentation found"
+          else
+            echo "has-sphinx=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check for MkDocs
+          if [ -f "mkdocs.yml" ]; then
+            echo "has-mkdocs=true" >> $GITHUB_OUTPUT
+            echo "✅ MkDocs configuration found"
+          else
+            echo "has-mkdocs=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check for JSDoc
+          if [ -f "jsdoc.json" ] || [ -f "jsdoc.conf" ] || grep -q "jsdoc" package.json 2>/dev/null; then
+            echo "has-jsdoc=true" >> $GITHUB_OUTPUT
+            echo "✅ JSDoc configuration found"
+          else
+            echo "has-jsdoc=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check for TypeDoc
+          if [ -f "typedoc.json" ] || grep -q "typedoc" package.json 2>/dev/null; then
+            echo "has-typedoc=true" >> $GITHUB_OUTPUT
+            echo "✅ TypeDoc configuration found"
+          else
+            echo "has-typedoc=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check for Javadoc
+          if [ -f "pom.xml" ] || [ -f "build.gradle" ]; then
+            echo "has-javadoc=true" >> $GITHUB_OUTPUT
+            echo "✅ Java project with Javadoc support found"
+          else
+            echo "has-javadoc=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check for RustDoc
+          if [ -f "Cargo.toml" ]; then
+            echo "has-rustdoc=true" >> $GITHUB_OUTPUT
+            echo "✅ Rust project with RustDoc support found"
+          else
+            echo "has-rustdoc=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check for GoDoc
+          if [ -f "go.mod" ]; then
+            echo "has-godoc=true" >> $GITHUB_OUTPUT
+            echo "✅ Go project with GoDoc support found"
+          else
+            echo "has-godoc=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Determine docs directory
+          if [ -d "docs" ]; then
+            echo "docs-dir=docs" >> $GITHUB_OUTPUT
+          elif [ -d "doc" ]; then
+            echo "docs-dir=doc" >> $GITHUB_OUTPUT
+          elif [ -d "documentation" ]; then
+            echo "docs-dir=documentation" >> $GITHUB_OUTPUT
+          else
+            echo "docs-dir=." >> $GITHUB_OUTPUT
+          fi
+
+  lint-markdown:
+    name: 🔍 Lint Markdown
+    runs-on: ubuntu-latest
+    needs: detect-docs
+    if: needs.detect-docs.outputs.has-markdown == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint markdown files
+        uses: DavidAnson/markdownlint-cli2-action@v15
+        continue-on-error: true
+        with:
+          globs: |
+            **/*.md
+            !node_modules/**
+            !vendor/**
+
+      - name: Check markdown links
+        continue-on-error: true
+        run: |
+          echo "## 🔗 Link Check Results" >> $GITHUB_STEP_SUMMARY
+          
+          find . -name "*.md" ! -path "./node_modules/*" ! -path "./.git/*" ! -path "./vendor/*" | while read file; do
+            # Extract links
+            grep -oP '\[.*?\]\(\K[^)]+' "$file" 2>/dev/null | while read link; do
+              # Skip anchors, mailto, and external URLs (simple check)
+              if [[ ! "$link" =~ ^# ]] && [[ ! "$link" =~ ^mailto: ]] && [[ ! "$link" =~ ^http ]]; then
+                # Check if local file exists
+                dir=$(dirname "$file")
+                full_path="$dir/$link"
+                if [ ! -f "$full_path" ] && [ ! -d "$full_path" ]; then
+                  echo "⚠️ Broken link in $file: $link" >> $GITHUB_STEP_SUMMARY
+                fi
+              fi
+            done
+          done
+
+  collect-docs:
+    name: 📚 Collect Documentation
+    runs-on: ubuntu-latest
+    needs: detect-docs
+    if: needs.detect-docs.outputs.has-markdown == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Organize documentation
+        run: |
+          mkdir -p compiled-docs
+          
+          # Create index
+          cat > compiled-docs/INDEX.md <<EOF
+          # 📚 Documentation Index
+          
+          **Generated**: $(date)
+          **Repository**: ${{ github.repository }}
+          **Branch**: ${{ github.ref_name }}
+          **Commit**: ${{ github.sha }}
+          
+          ## 📄 Documents
+          
+          EOF
+          
+          # Copy all markdown files
+          find . -name "*.md" ! -path "./node_modules/*" ! -path "./.git/*" ! -path "./vendor/*" ! -path "./compiled-docs/*" | while read file; do
+            # Preserve directory structure
+            target="compiled-docs${file#.}"
+            mkdir -p "$(dirname "$target")"
+            cp "$file" "$target"
+            
+            # Add to index
+            echo "- [${file#./}](.${file#.})" >> compiled-docs/INDEX.md
+          done
+          
+          # Generate statistics
+          total_files=$(find compiled-docs -name "*.md" | wc -l)
+          total_words=$(find compiled-docs -name "*.md" -exec wc -w {} + 2>/dev/null | tail -1 | awk '{print $1}')
+          
+          cat >> compiled-docs/INDEX.md <<EOF
+          
+          ## 📊 Statistics
+          - Total documents: $total_files
+          - Total words: ${total_words:-0}
+          
+          ---
+          *Auto-generated documentation index*
+          EOF
+
+      - name: Upload compiled docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-docs-${{ github.sha }}
+          path: compiled-docs/
+          retention-days: 90
+
+  build-sphinx:
+    name: 📖 Build Sphinx Docs
+    runs-on: ubuntu-latest
+    needs: detect-docs
+    if: needs.detect-docs.outputs.has-sphinx == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Sphinx
+        run: |
+          pip install sphinx sphinx-rtd-theme sphinx-autodoc-typehints
+
+      - name: Build Sphinx documentation
+        run: |
+          if [ -f "docs/conf.py" ]; then
+            sphinx-build -b html docs sphinx-build
+          elif [ -f "doc/conf.py" ]; then
+            sphinx-build -b html doc sphinx-build
+          fi
+
+      - name: Upload Sphinx docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sphinx-docs-${{ github.sha }}
+          path: sphinx-build/
+          retention-days: 30
+
+  build-mkdocs:
+    name: 📘 Build MkDocs
+    runs-on: ubuntu-latest
+    needs: detect-docs
+    if: needs.detect-docs.outputs.has-mkdocs == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install MkDocs
+        run: |
+          pip install mkdocs mkdocs-material
+
+      - name: Build MkDocs site
+        run: |
+          mkdocs build
+
+      - name: Upload MkDocs site
+        uses: actions/upload-artifact@v4
+        with:
+          name: mkdocs-site-${{ github.sha }}
+          path: site/
+          retention-days: 30
+
+  build-api-docs:
+    name: 📗 Build API Documentation
+    runs-on: ubuntu-latest
+    needs: detect-docs
+    if: |
+      needs.detect-docs.outputs.has-jsdoc == 'true' ||
+      needs.detect-docs.outputs.has-typedoc == 'true' ||
+      needs.detect-docs.outputs.has-javadoc == 'true' ||
+      needs.detect-docs.outputs.has-rustdoc == 'true' ||
+      needs.detect-docs.outputs.has-godoc == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # JSDoc
+      - name: Build JSDoc
+        if: needs.detect-docs.outputs.has-jsdoc == 'true'
+        run: |
+          npm install -g jsdoc
+          mkdir -p api-docs/javascript
+          jsdoc -r . -d api-docs/javascript 2>/dev/null || echo "JSDoc generation completed"
+
+      # TypeDoc
+      - name: Build TypeDoc
+        if: needs.detect-docs.outputs.has-typedoc == 'true'
+        run: |
+          npm install
+          npx typedoc --out api-docs/typescript 2>/dev/null || echo "TypeDoc generation completed"
+
+      # Javadoc
+      - name: Build Javadoc
+        if: needs.detect-docs.outputs.has-javadoc == 'true'
+        run: |
+          mkdir -p api-docs/java
+          if [ -f "pom.xml" ]; then
+            mvn javadoc:javadoc || true
+            [ -d "target/site/apidocs" ] && cp -r target/site/apidocs/* api-docs/java/
+          elif [ -f "build.gradle" ]; then
+            ./gradlew javadoc || true
+            [ -d "build/docs/javadoc" ] && cp -r build/docs/javadoc/* api-docs/java/
+          fi
+
+      # RustDoc
+      - name: Build RustDoc
+        if: needs.detect-docs.outputs.has-rustdoc == 'true'
+        run: |
+          cargo doc --no-deps
+          mkdir -p api-docs/rust
+          [ -d "target/doc" ] && cp -r target/doc/* api-docs/rust/
+
+      # GoDoc
+      - name: Build GoDoc
+        if: needs.detect-docs.outputs.has-godoc == 'true'
+        run: |
+          go install golang.org/x/tools/cmd/godoc@latest
+          mkdir -p api-docs/go
+          echo "GoDoc can be viewed by running: godoc -http=:6060"
+
+      - name: Upload API docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-docs-${{ github.sha }}
+          path: api-docs/
+          retention-days: 30
+
+  create-docs-site:
+    name: 🌐 Create Documentation Site
+    runs-on: ubuntu-latest
+    needs: [detect-docs, collect-docs, build-api-docs]
+    if: |
+      always() &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      needs.detect-docs.outputs.has-markdown == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download compiled docs
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: compiled-docs-${{ github.sha }}
+          path: docs-site/
+
+      - name: Download API docs
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: api-docs-${{ github.sha }}
+          path: docs-site/api/
+
+      - name: Create documentation site
+        run: |
+          cat > docs-site/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Project Documentation</title>
+              <style>
+                  * { margin: 0; padding: 0; box-sizing: border-box; }
+                  body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                      line-height: 1.6;
+                      color: #333;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      min-height: 100vh;
+                      padding: 20px;
+                  }
+                  .container {
+                      max-width: 1200px;
+                      margin: 0 auto;
+                      background: white;
+                      border-radius: 10px;
+                      padding: 40px;
+                      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                  }
+                  h1 { color: #667eea; margin-bottom: 20px; }
+                  .section {
+                      background: #f8f9fa;
+                      padding: 20px;
+                      margin: 20px 0;
+                      border-radius: 8px;
+                      border-left: 4px solid #667eea;
+                  }
+                  .section h2 { color: #764ba2; margin-bottom: 15px; }
+                  .doc-list { list-style: none; }
+                  .doc-list li {
+                      padding: 10px;
+                      border-bottom: 1px solid #e9ecef;
+                  }
+                  .doc-list li:last-child { border-bottom: none; }
+                  .doc-list a {
+                      text-decoration: none;
+                      color: #667eea;
+                      font-weight: 500;
+                  }
+                  .doc-list a:hover {
+                      color: #764ba2;
+                      text-decoration: underline;
+                  }
+                  .meta {
+                      background: #e3f2fd;
+                      padding: 15px;
+                      border-radius: 8px;
+                      margin-bottom: 30px;
+                  }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>📚 Project Documentation</h1>
+                  
+                  <div class="meta">
+                      <strong>Repository:</strong> ${{ github.repository }}<br>
+                      <strong>Branch:</strong> ${{ github.ref_name }}<br>
+                      <strong>Generated:</strong> $(date)
+                  </div>
+                  
+                  <div class="section">
+                      <h2>📖 Documentation</h2>
+                      <ul class="doc-list" id="doc-list">
+                          <li>📄 <a href="INDEX.md">Documentation Index</a></li>
+                      </ul>
+                  </div>
+                  
+                  <div class="section">
+                      <h2>🔧 API Documentation</h2>
+                      <ul class="doc-list">
+                          <li>📘 <a href="api/">API Reference</a></li>
+                      </ul>
+                  </div>
+              </div>
+              
+              <script>
+                  // Auto-discover markdown files
+                  fetch('INDEX.md')
+                      .then(r => r.text())
+                      .then(text => {
+                          const links = text.match(/\[.*?\]\(.*?\)/g) || [];
+                          const list = document.getElementById('doc-list');
+                          links.slice(0, 20).forEach(link => {
+                              const match = link.match(/\[(.*?)\]\((.*?)\)/);
+                              if (match) {
+                                  const li = document.createElement('li');
+                                  li.innerHTML = `📄 <a href="${match[2]}">${match[1]}</a>`;
+                                  list.appendChild(li);
+                              }
+                          });
+                      })
+                      .catch(() => console.log('INDEX.md not found'));
+              </script>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/
+
+  deploy-pages:
+    name: 🚀 Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: create-docs-site
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  summary:
+    name: 📊 Documentation Summary
+    runs-on: ubuntu-latest
+    needs: [detect-docs, lint-markdown, collect-docs, build-api-docs]
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # 📚 Documentation Report
+          
+          ## 🔍 Documentation Types Detected
+          | Type | Status |
+          |------|--------|
+          | Markdown | ${{ needs.detect-docs.outputs.has-markdown == 'true' && '✅' || '❌' }} |
+          | Sphinx | ${{ needs.detect-docs.outputs.has-sphinx == 'true' && '✅' || '❌' }} |
+          | MkDocs | ${{ needs.detect-docs.outputs.has-mkdocs == 'true' && '✅' || '❌' }} |
+          | JSDoc | ${{ needs.detect-docs.outputs.has-jsdoc == 'true' && '✅' || '❌' }} |
+          | TypeDoc | ${{ needs.detect-docs.outputs.has-typedoc == 'true' && '✅' || '❌' }} |
+          | Javadoc | ${{ needs.detect-docs.outputs.has-javadoc == 'true' && '✅' || '❌' }} |
+          | RustDoc | ${{ needs.detect-docs.outputs.has-rustdoc == 'true' && '✅' || '❌' }} |
+          | GoDoc | ${{ needs.detect-docs.outputs.has-godoc == 'true' && '✅' || '❌' }} |
+          
+          ## 📊 Job Results
+          - Lint: ${{ needs.lint-markdown.result }}
+          - Collect: ${{ needs.collect-docs.result }}
+          - API Docs: ${{ needs.build-api-docs.result }}
+          
+          ## 📂 Documentation Directory
+          ${{ needs.detect-docs.outputs.docs-dir }}
+          
+          ---
+          *Generated by Generic Documentation Workflow*
+          EOF
